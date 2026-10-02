@@ -1,0 +1,9 @@
+.git
+.auth
+.local
+cases
+data
+runs
+__pycache__
+*.pyc
+checkpoints

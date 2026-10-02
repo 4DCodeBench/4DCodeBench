@@ -1,0 +1,3 @@
+# MoGe-3: install with --no-deps. Its declared dependencies cover the demo and training
+# code; inference needs only packages from the other two files.
+moge @ git+https://github.com/microsoft/MoGe.git@74fbce054ebed49800de42d0ad0e83495065719a

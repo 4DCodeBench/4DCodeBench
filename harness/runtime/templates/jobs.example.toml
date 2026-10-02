@@ -1,0 +1,16 @@
+# The job list: which case each agent runs, and how many trials of each.
+# Every [[job]] is expanded to `trials` entries, one per trial number.
+
+trials = 1
+
+[[job]]
+case = "synthetic/B_01"                             # bare case name or <kind>/<case>
+agent = "claude"                                    # claude, codex, antigravity or stirrup
+model = "<MODEL>"
+effort = "medium"                                   # claude/codex: low..max; antigravity: low..high; stirrup: forwarded to the endpoint as-is
+
+[[job]]
+case = "real/abc_130k_01_dual_arm_robotic"
+agent = "codex"
+model = "<MODEL>"
+effort = "high"

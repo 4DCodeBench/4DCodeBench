@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+
+# credentials and local configuration
+.env
+.auth/
+.local/
+
+# data
+/cases
+/data
+/runs
+# 4DCodeBench/Results before scripts/place_renders.py, and the judge's frame cache
+/results
+frame_cache/
+
+# model weights, from scripts/download_checkpoints.sh
+/checkpoints

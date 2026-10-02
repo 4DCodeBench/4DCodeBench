@@ -1,0 +1,13 @@
+# The scorer's PyPI packages, on top of torch 2.13.0 and torchvision 0.28.0 (CUDA 13.0).
+numpy==2.3.1
+h5py==3.16.0
+scipy==1.18.0
+trimesh==4.11.1
+rtree==1.4.1
+libigl==2.6.2
+timm==1.0.28
+easydict==1.13
+transformers==4.57.1
+opencv-python-headless==4.11.0.86
+sentencepiece==0.2.2
+ninja

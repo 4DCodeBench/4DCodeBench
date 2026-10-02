@@ -1,0 +1,67 @@
+# Deployment configuration: where things live on this machine and how containers
+# are started. Copy it, fill in the placeholders, and pass it as `--runtime`.
+# Relative paths resolve against the repository root.
+
+backend = "docker"          # "docker" or "sif" (SingularityCE / Apptainer)
+cases_root = "cases"        # <kind>/<case>/reference.mp4
+data_root = "data"          # <kind>/<case>/world, annotation/ and estimates/: the scorer's hidden inputs
+runs_root = "runs"
+auth_root = ".auth"         # the CLIs' credential files
+
+[agent]
+timeout_sec = 21600         # one run's wall-clock budget
+
+[agent.image]
+docker = "4dcb/agent:dev"
+sif = "<IMAGE_ROOT>/4dcb-agent-dev.sif"
+
+[agent.environment]
+network_mode = "default"    # the CLI must reach its model provider
+
+# One table per agent. `credential` names a file under auth_root and `container`
+# the path it is mounted at; both are optional, and given together. `[agent.X.env]`
+# adds environment variables for that CLI alone.
+[agent.claude]
+credential = "claude.json"
+container = "/root/.claude/.credentials.json"
+
+[agent.claude.env]
+BASH_MAX_TIMEOUT_MS = "21600000"  # 6 h, the run's own budget: no shorter limit on one command
+
+[agent.codex]
+credential = "gpt.json"
+container = "/root/.codex/auth.json"
+
+[agent.antigravity]
+credential = "gemini.json"
+container = "/root/.gemini/antigravity-cli/antigravity-oauth-token"
+
+# The `stirrup` agent (harness/stirrup/runner.py) drives any OpenAI-compatible
+# Chat Completions endpoint and needs no credential file, only its address.
+[agent.stirrup.env]
+OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
+OPENAI_API_KEY = "local"
+
+[scorer]
+timeout_sec = 3600          # one container, which walks a whole shard
+# prepare_timeout_sec = 3600        # the prepare stage's own limit; timeout_sec without it
+# viz_timeout_sec = 3600            # the viz stage's own limit; timeout_sec without it
+# task_timeout_sec = 1800           # one metric or one world's model inference
+# task_prepare_timeout_sec = 600    # one geometry preparation or model load
+checkpoints = "checkpoints"       # model weights (docs/checkpoints.md), mounted read-only
+
+[scorer.image]
+docker = "4dcb/scorer:dev"
+sif = "<IMAGE_ROOT>/4dcb-scorer-dev.sif"
+
+[scorer.environment]
+network_mode = "no-network"
+cpus = 8
+memory_mb = 32768
+gpus = 1
+
+[docker]
+executable = "docker"
+
+[sif]
+executable = "singularity"  # or "apptainer"

@@ -1,0 +1,25 @@
+# Conda environment for the scorer, the visualizer and the viewer, outside a container.
+#
+#     conda env create -f environment.yml
+#     conda activate 4dcodebench
+#     scripts/setup_env.sh
+#
+# Conda provides Python, the CUDA 13.0 toolkit and the native libraries; setup_env.sh
+# installs the Python packages of the scorer image with uv and builds `scorer-vdb`.
+name: 4dcodebench
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - cuda-version=13.0
+  - cuda-nvcc
+  - cuda-libraries-dev
+  - cuda-cccl
+  - gxx=13
+  - ffmpeg
+  - libgl
+  - openvdb=13.0.0
+  - tbb-devel
+  - git
+  - uv

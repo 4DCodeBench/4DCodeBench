@@ -1,0 +1,559 @@
+"""Stirrup's local shell backend (stirrup 0.2.0, tools/code_backends/local.py) with three changes for sandboxed
+agents: stdin is closed, output is collected as it arrives, and reading stops once the direct child exits.
+"""
+"""Local execution environment backend for code execution in an isolated temp directory."""
+
+import contextlib
+import logging
+import os
+import re
+import shutil
+import signal
+import subprocess
+import tempfile
+from pathlib import Path
+
+import anyio
+
+from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
+
+from stirrup.tools.code_backends.base import (
+    SHELL_TIMEOUT,
+    CodeExecToolProvider,
+    CodeExecutionParams,
+    CommandResult,
+    OutputSourceRoot,
+    SaveOutputFilesResult,
+    UploadedFile,
+    UploadFilesResult,
+    _atomic_write_bytes,
+    _host_output_destination_identity,
+    _save_host_output_files,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class LocalCodeExecToolProvider(CodeExecToolProvider):
+    """Local code execution tool provider using an isolated temp directory.
+
+    Commands are executed with the temp directory as the working directory.
+    An optional allowlist can restrict which commands are permitted.
+
+    Usage with Agent:
+        from stirrup.clients.chat_completions_client import ChatCompletionsClient
+
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
+        agent = Agent(
+            client=client,
+            name="assistant",
+            tools=[LocalCodeExecToolProvider(), CALCULATOR_TOOL],
+        )
+
+        async with agent.session(output_dir="./output") as session:
+            await session.run("Run some Python code")
+
+    Standalone usage:
+        provider = LocalCodeExecToolProvider()
+
+        async with provider as tool:
+            # tool is a Tool instance for code execution
+            result = await provider.run_command("python script.py")
+            await provider.save_output_files(["output.txt"], "/path/to/output")
+    """
+
+    def __init__(
+        self,
+        *,
+        allowed_commands: list[str] | None = None,
+        temp_base_dir: Path | str | None = None,
+        description: str | None = None,
+        shell_timeout: int = SHELL_TIMEOUT,
+    ) -> None:
+        """Initialize LocalCodeExecToolProvider configuration.
+
+        Args:
+            allowed_commands: Optional list of regex patterns. When set,
+                             commands are matched against the patterns and run
+                             without a shell, with literal arguments. When
+                             None, all commands are allowed and run through
+                             bash.
+            temp_base_dir: Optional base directory for creating the execution environment
+                          temp directory. If None, uses the system default temp directory.
+            description: Optional description of the tool. If None, uses the default description.
+            shell_timeout: Per-command wall-clock timeout (seconds) for every
+                ``code_exec`` invocation, and the default for direct
+                ``run_command`` calls that pass ``timeout=None``. Defaults to
+                ``SHELL_TIMEOUT``.
+
+        """
+        super().__init__(allowed_commands=allowed_commands, shell_timeout=shell_timeout)
+        self._temp_dir: Path | None = None
+        self._temp_base_dir: Path | None = Path(temp_base_dir) if temp_base_dir else None
+        self._description = (
+            description
+            or "Execute a shell command in the execution environment. Returns exit code, stdout, and stderr as XML. Use `uv` to manage packages."
+        )
+
+    @property
+    def temp_dir(self) -> Path | None:
+        """Return the temp directory path, or None if not started."""
+        return self._temp_dir
+
+    def _check_absolute_paths(self, argv: list[str] | None, cmd: str) -> CommandResult | None:
+        """Check if a command references absolute paths that escape the temp directory.
+
+        Args:
+            argv: Parsed arguments when an allowlist is configured, else None.
+            cmd: Raw command, run through Bash when there is no allowlist.
+
+        Returns:
+            CommandResult with error if absolute paths detected, None otherwise.
+
+        Note:
+            This check is specific to LocalCodeExecToolProvider since Docker and E2B
+            providers are already sandboxed and absolute paths are safe within them.
+        """
+        # argv is what actually runs, so the patterns must see it rather than
+        # the raw string: quoting inside a path (``/et''c/passwd``) survives in
+        # the string but not in the parsed argument. Home-directory spellings
+        # are only expanded by Bash, so they are checked on that path alone.
+        absolute_patterns = [
+            r"/(?:home|Users|tmp|var|etc)/",  # /home/, /Users/, /tmp/, etc.
+        ]
+        if argv is None:
+            absolute_patterns += [
+                r"~/",  # ~/path - home directory shortcut
+                r"\$HOME/",  # $HOME/path
+                r"\$\{HOME\}/",  # ${HOME}/path
+            ]
+        for target in argv if argv is not None else [cmd]:
+            if any(re.search(pattern, target) for pattern in absolute_patterns):
+                return CommandResult(
+                    exit_code=1,
+                    stdout="",
+                    stderr=(
+                        "Command appears to use absolute paths which could write outside "
+                        "the execution environment. Use relative paths instead."
+                    ),
+                    error_kind="absolute_path_detected",
+                    advice=(
+                        "Use relative paths (e.g., './output.txt' instead of '~/output.txt'). "
+                        "For full filesystem access, use DockerCodeExecToolProvider or E2BCodeExecToolProvider."
+                    ),
+                )
+        return None
+
+    async def __aenter__(self) -> "Tool[CodeExecutionParams, ToolUseCountMetadata]":
+        """Create temp directory and return the code_exec tool."""
+        if self._temp_base_dir:
+            self._temp_base_dir.mkdir(parents=True, exist_ok=True)
+        self._temp_dir = Path(tempfile.mkdtemp(prefix="local_exec_env_", dir=self._temp_base_dir))
+        logger.debug("Created local execution environment temp directory: %s", self._temp_dir)
+        return self.get_code_exec_tool(description=self._description)
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        """Cleanup the local execution environment."""
+        if self._temp_dir and self._temp_dir.exists():
+            try:
+                shutil.rmtree(self._temp_dir)
+            except Exception as exc:
+                logger.warning("Failed to cleanup temp directory %s: %s", self._temp_dir, exc)
+        self._temp_dir = None
+
+    def _resolve_and_validate_path(self, path: str) -> Path:
+        """Resolve a path and validate it's within the temp directory.
+
+        Args:
+            path: File path (relative or absolute within the temp dir).
+
+        Returns:
+            Resolved absolute Path.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+            FileNotFoundError: If path does not exist (for reads).
+
+        """
+        if self._temp_dir is None:
+            raise RuntimeError("ExecutionEnvironment not started.")
+
+        resolved = Path(path)
+        if not resolved.is_absolute():
+            resolved = self._temp_dir / resolved
+
+        # Security: ensure path is within temp directory
+        try:
+            resolved.resolve().relative_to(self._temp_dir.resolve())
+        except ValueError as e:
+            raise ValueError(f"Path is outside execution environment: {path}") from e
+
+        return resolved
+
+    async def read_file_bytes(self, path: str) -> bytes:
+        """Read file content as bytes from the temp directory.
+
+        Args:
+            path: File path (relative or absolute within the temp dir).
+
+        Returns:
+            File contents as bytes.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+            FileNotFoundError: If file does not exist.
+
+        """
+        resolved = self._resolve_and_validate_path(path)
+        if not resolved.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        return resolved.read_bytes()
+
+    async def write_file_bytes(self, path: str, content: bytes) -> None:
+        """Write bytes to a file in the temp directory.
+
+        Args:
+            path: Destination path (relative or absolute within the temp dir).
+            content: File contents to write.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+
+        """
+        resolved = self._resolve_and_validate_path(path)
+        _atomic_write_bytes(content, resolved)
+
+    async def file_exists(self, path: str) -> bool:
+        """Check if a file exists in the temp directory.
+
+        Args:
+            path: File path (relative or absolute within the temp dir).
+
+        Returns:
+            True if the file exists, False otherwise.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+
+        """
+        resolved = self._resolve_and_validate_path(path)
+        return resolved.exists() and resolved.is_file()
+
+    async def is_directory(self, path: str) -> bool:
+        """Check if a path is a directory in the temp directory.
+
+        Args:
+            path: Path (relative or absolute within the temp dir).
+
+        Returns:
+            True if the path exists and is a directory, False otherwise.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+
+        """
+        resolved = self._resolve_and_validate_path(path)
+        return resolved.exists() and resolved.is_dir()
+
+    async def list_files(self, path: str) -> list[str]:
+        """List all files recursively in a directory within the temp directory.
+
+        Args:
+            path: Directory path (relative or absolute within the temp dir).
+
+        Returns:
+            List of file paths (relative to the given path) for all files in the directory.
+            Returns an empty list if the path is a file or doesn't exist.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+
+        """
+        resolved = self._resolve_and_validate_path(path)
+        if not resolved.exists() or not resolved.is_dir():
+            return []
+
+        files = []
+        for file_path in resolved.rglob("*"):
+            if file_path.is_file():
+                rel_path = file_path.relative_to(resolved)
+                files.append(str(rel_path))
+        return files
+
+    async def run_command(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
+        """Execute command in the temp directory.
+
+        Args:
+            cmd: Shell command to execute (bash syntax).
+            timeout: Maximum time in seconds to wait for command completion.
+                If None, falls back to ``self._shell_timeout`` (set in
+                ``__init__``), so direct callers share the same budget as the
+                LLM ``code_exec`` tool.
+
+        Returns:
+            CommandResult with exit_code, stdout, stderr, and optional error info.
+
+        """
+        if self._temp_dir is None:
+            raise RuntimeError(
+                "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
+            )
+        if timeout is None:
+            timeout = self._shell_timeout
+
+        # With an allowlist, the parsed argv must run directly (no shell).
+        argv, rejection = self._prepare_command(cmd)
+        if rejection is not None:
+            return rejection
+
+        # Check for absolute paths (local environment is not sandboxed)
+        absolute_path_error = self._check_absolute_paths(argv, cmd)
+        if absolute_path_error:
+            return absolute_path_error
+
+        process = None
+        try:
+            with anyio.fail_after(timeout):
+                # start_new_session=True puts the child at the head of its own
+                # session, so pgid == child pid and we can killpg the whole tree
+                # on timeout. Without it, process.kill() only terminates the
+                # root process, leaving grandchildren reparented to init (same
+                # bug shape as the docker orphan leak that motivated this PR).
+                process = await anyio.open_process(
+                    argv if argv is not None else ["bash", "-c", cmd],
+                    stdin=subprocess.DEVNULL,  # a never-closed stdin pipe hangs any command that reads stdin
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=self._temp_dir,
+                    start_new_session=True,
+                )
+
+                # Read all output from streams concurrently
+                stdout_chunks: list[bytes] = []
+                stderr_chunks: list[bytes] = []
+
+                async def read_stdout() -> None:
+                    if process.stdout:
+                        async for chunk in process.stdout:
+                            stdout_chunks.append(chunk)
+
+                async def read_stderr() -> None:
+                    if process.stderr:
+                        async for chunk in process.stderr:
+                            stderr_chunks.append(chunk)
+
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(read_stdout)
+                    tg.start_soon(read_stderr)
+                    # stop reading once the direct child has exited: a backgrounded subshell that inherited
+                    # the pipes would otherwise hold the tool call open until its timeout
+                    await process.wait()
+                    await anyio.sleep(0.5)
+                    tg.cancel_scope.cancel()
+
+                return CommandResult(
+                    exit_code=process.returncode or 0,
+                    stdout=b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+                    stderr=b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+                )
+
+        except TimeoutError:
+            if process:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                with anyio.move_on_after(5):
+                    await process.wait()
+            return CommandResult(
+                exit_code=1,
+                stdout="",
+                stderr=f"Command timed out after {timeout} seconds",
+                error_kind="timeout",
+            )
+        except Exception as exc:
+            return CommandResult(
+                exit_code=1,
+                stdout="",
+                stderr=str(exc),
+                error_kind="execution_error",
+            )
+
+    async def save_output_files(
+        self,
+        paths: list[str],
+        output_dir: Path | str,
+        dest_env: "CodeExecToolProvider | None" = None,
+    ) -> SaveOutputFilesResult:
+        """Copy files from the temp directory to a destination.
+
+        Source files remain in the execution environment. Existing destination
+        files are atomically replaced, while duplicate destinations within one
+        call are rejected and reported in ``failed``.
+
+        When dest_env is provided (cross-environment transfer), files are copied
+        using the base class implementation via read/write primitives.
+
+        Args:
+            paths: List of file paths in the execution environment (relative or absolute).
+                   Relative paths are resolved against the execution environment temp directory.
+            output_dir: Directory path to save files to.
+            dest_env: If provided, output_dir is interpreted as a path within dest_env
+                      (cross-environment transfer). If None, output_dir is a local
+                      filesystem path.
+
+        Returns:
+            SaveOutputFilesResult containing lists of saved files and any failures.
+
+        """
+        if self._temp_dir is None:
+            raise RuntimeError(
+                "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
+            )
+
+        # If dest_env is provided, use the base class implementation (cross-env transfer)
+        if dest_env is not None:
+            return await super().save_output_files(paths, output_dir, dest_env)
+
+        return _save_host_output_files(
+            paths,
+            output_dir,
+            source_roots=self.output_source_roots(),
+            resolve_source=self._resolve_and_validate_path,
+        )
+
+    def output_source_roots(self) -> tuple[OutputSourceRoot, ...]:
+        """Return absolute execution roots accepted when resolving output paths."""
+        return (OutputSourceRoot.for_host(self._temp_dir),) if self._temp_dir is not None else ()
+
+    async def output_destination_identity(self, destination: str, output_root: Path | str) -> str:
+        """Validate a cross-environment destination and return its host identity."""
+        resolved_destination = self._resolve_and_validate_path(destination)
+        resolved_root = self._resolve_and_validate_path(str(output_root))
+        return _host_output_destination_identity(resolved_destination, resolved_root)
+
+    async def upload_files(
+        self,
+        *paths: Path | str,
+        source_env: "CodeExecToolProvider | None" = None,
+        dest_dir: str | None = None,
+    ) -> UploadFilesResult:
+        """Upload files to the execution environment.
+
+        When source_env is None (local filesystem), files are COPIED (not moved) -
+        originals remain on the local filesystem.
+        Directories are uploaded recursively, preserving their structure.
+
+        When source_env is provided (cross-environment transfer), files are copied
+        using the base class implementation via read/write primitives.
+
+        Args:
+            *paths: File or directory paths to upload. If source_env is None, these
+                    are local filesystem paths. If source_env is provided, these are
+                    paths within source_env.
+            source_env: If provided, paths are within source_env. If None, paths are
+                        local filesystem paths.
+            dest_dir: Destination subdirectory within the temp directory.
+                      If None, files are placed directly in the temp directory.
+
+        Returns:
+            UploadFilesResult containing lists of uploaded files and any failures.
+
+        """
+        if self._temp_dir is None:
+            raise RuntimeError(
+                "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
+            )
+
+        # If source_env is provided, use the base class implementation (cross-env transfer)
+        if source_env is not None:
+            return await super().upload_files(*paths, source_env=source_env, dest_dir=dest_dir)
+
+        # Local filesystem - use optimized copy operation
+        dest_base = self._temp_dir / dest_dir if dest_dir else self._temp_dir
+        dest_base.mkdir(parents=True, exist_ok=True)
+
+        result = UploadFilesResult()
+
+        for source in paths:
+            source = Path(source).resolve()
+
+            if not source.exists():
+                result.failed[str(source)] = "File or directory does not exist"
+                logger.warning("Upload source does not exist: %s", source)
+                continue
+
+            try:
+                if source.is_file():
+                    dest = dest_base / source.name
+                    shutil.copy2(source, dest)
+                    result.uploaded.append(
+                        UploadedFile(
+                            source_path=source,
+                            dest_path=str(dest.relative_to(self._temp_dir)),
+                            size=source.stat().st_size,
+                        ),
+                    )
+                    logger.debug("Uploaded file: %s -> %s", source, dest)
+
+                elif source.is_dir():
+                    # If dest_dir was explicitly provided, copy contents directly to dest_base
+                    # Otherwise, create a subdirectory with the source's name
+                    if dest_dir:
+                        dest = dest_base
+                        # Copy contents of source directory into dest_base
+                        for item in source.iterdir():
+                            item_dest = dest / item.name
+                            if item.is_file():
+                                shutil.copy2(item, item_dest)
+                            else:
+                                shutil.copytree(item, item_dest, dirs_exist_ok=True)
+                    else:
+                        dest = dest_base / source.name
+                        shutil.copytree(source, dest, dirs_exist_ok=True)
+                    # Track all individual files uploaded
+                    for file_path in source.rglob("*"):
+                        if file_path.is_file():
+                            relative = file_path.relative_to(source)
+                            dest_file = dest / relative
+                            result.uploaded.append(
+                                UploadedFile(
+                                    source_path=file_path,
+                                    dest_path=str(dest_file.relative_to(self._temp_dir)),
+                                    size=file_path.stat().st_size,
+                                ),
+                            )
+                    logger.debug("Uploaded directory: %s -> %s", source, dest)
+
+            except Exception as exc:
+                result.failed[str(source)] = str(exc)
+                logger.exception("Failed to upload: %s", source)
+
+        return result
+
+    async def view_image(self, path: str) -> ImageContentBlock:
+        """Read and return an image file from the local execution environment.
+
+        Args:
+            path: Path to image file (relative to temp directory, or absolute within it).
+
+        Returns:
+            ImageContentBlock containing the image data.
+
+        Raises:
+            RuntimeError: If execution environment not started.
+            FileNotFoundError: If file does not exist.
+            ValueError: If path is outside temp directory, is a directory, or not a valid image.
+
+        """
+        file_bytes = await self.read_file_bytes(path)
+        return ImageContentBlock(data=file_bytes)
