@@ -327,4 +327,10 @@ All metrics range from 0 to 1, with higher values indicating better results, exc
 ## Citation
 
 ```bibtex
+@article{shen20264dcodebench,
+  title={{4DCodeBench}: Benchmarking Agents on Inverse Graphics of Dynamic Scenes},
+  author={Shen, Ruihong and Kova{\v{c}}i{\v{c}}, {\v{Z}}iga and Kulits, Peter and Wang, Xingrui and Li, Zizhang and Tenenbaum, Joshua B. and Yuille, Alan and Chen, Jieneng and Wu, Jiajun},
+  journal={arXiv preprint arXiv:2610.03715},
+  year={2026}
+}
 ```
