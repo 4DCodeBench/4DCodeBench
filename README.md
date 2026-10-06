@@ -11,9 +11,9 @@
     <p>
         <a href="https://ruihong04.github.io/">Ruihong Shen</a><sup>1*†</sup>&nbsp;&nbsp;
         <a href="https://zzigak.github.io/">Žiga Kovačič</a><sup>2*</sup>&nbsp;&nbsp;
-        <a href="https://kulits.github.io/">Peter Kulits</a><sup>3,2*</sup>&nbsp;&nbsp;
+        <a href="https://kulits.github.io/">Peter Kulits</a><sup>2,3*</sup>&nbsp;&nbsp;
         <a href="https://xingruiwang.github.io/">Xingrui Wang</a><sup>1</sup>&nbsp;&nbsp;
-        <a href="https://profiles.stanford.edu/zizhang-li">Zizhang Li</a><sup>2</sup>&nbsp;&nbsp;
+        <a href="https://kyleleey.github.io/">Zizhang Li</a><sup>2</sup>&nbsp;&nbsp;
         <a href="https://cocosci.mit.edu/josh-tenenbaum/">Joshua B. Tenenbaum</a><sup>4</sup>&nbsp;&nbsp;
         <a href="https://www.cs.jhu.edu/~ayuille/">Alan Yuille</a><sup>1</sup>&nbsp;&nbsp;
         <a href="https://beckschen.github.io/">Jieneng Chen</a><sup>2‡</sup>&nbsp;&nbsp;
@@ -35,6 +35,9 @@
 <p align="center">
     <a href='https://4dcodebench.com/' target="_blank">
         <img src='https://img.shields.io/badge/Project-Page-blue?style=plastic&logo=google-chrome&logoColor=white' alt='Project Page'>
+    </a>
+    <a href='https://arxiv.org/abs/2610.03715' target="_blank">
+        <img src='https://img.shields.io/badge/Paper-Arxiv-B31B1B?style=plastic&logo=arxiv&logoColor=white' alt='Paper'>
     </a>
     <a href='https://huggingface.co/4DCodeBench' target="_blank">
         <img src='https://img.shields.io/badge/Dataset-Hugging_Face-yellow?style=plastic&logo=huggingface&logoColor=white' alt='Dataset'>
