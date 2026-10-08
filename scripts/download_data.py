@@ -4,18 +4,22 @@
     python scripts/download_data.py                  # both kinds, videos and evaluation data
     python scripts/download_data.py --videos-only    # reference videos only, enough for inference
     python scripts/download_data.py --kind real
+    python scripts/download_data.py --estimates      # also the precomputed reference estimates
 
 Sources:
 
     4DCodeBench/Dataset-Real-World   videos/<case>.mp4, annotations/<case>/dynamic_mask.npz,
                                      scripts/prepare_videos.py for the videos not redistributed
     4DCodeBench/Dataset-Synthetic    videos/<case>.mp4, worlds/<case>.h5
+    4DCodeBench/Dataset-Model-Estimation
+                                     <kind>/<case>/*, with --estimates
 
 Output:
 
     cases/<kind>/<case>/reference.mp4
     data/real/<case>/annotation/dynamic_mask.npz
     data/synthetic/<case>/world/
+    data/<kind>/<case>/estimates/                     with --estimates
 
 Files already in place are skipped, so an interrupted download resumes by running again.
 Real-World clips whose licence forbids redistribution are rebuilt from their public sources
@@ -40,6 +44,7 @@ from huggingface_hub import hf_hub_download, list_repo_files, snapshot_download
 ROOT = Path(__file__).resolve().parent.parent
 REAL = "4DCodeBench/Dataset-Real-World"
 SYNTHETIC = "4DCodeBench/Dataset-Synthetic"
+ESTIMATES = "4DCodeBench/Dataset-Model-Estimation"
 
 
 def copy(source: Path, target: Path) -> None:
@@ -85,6 +90,18 @@ def synthetic(videos_only: bool, tmp: Path) -> None:
             unpack(packed, world)
             packed.unlink()
     print(f"synthetic: {len(cases)} cases")
+
+
+def estimates(kind: str, tmp: Path) -> None:
+    files = [f for f in list_repo_files(ESTIMATES, repo_type="dataset") if f.startswith(f"{kind}/")]
+    for f in files:
+        _, case, name = f.split("/")
+        target = ROOT / "data" / kind / case / "estimates" / name
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(hf_hub_download(ESTIMATES, f, repo_type="dataset", local_dir=tmp / "estimates"),
+                        target)
+    print(f"{kind} estimates: {len({f.split('/')[1] for f in files})} cases")
 
 
 def unpack(packed: Path, world: Path) -> None:
@@ -136,12 +153,18 @@ def main() -> None:
     ap.add_argument("--kind", choices=("real", "synthetic"), help="one kind only (default: both)")
     ap.add_argument("--videos-only", action="store_true",
                     help="reference videos only, without the evaluation data")
+    ap.add_argument("--estimates", action="store_true",
+                    help="also the precomputed reference estimates (53 GB), so prepare can be skipped")
     args = ap.parse_args()
     with tempfile.TemporaryDirectory() as tmp:
         if args.kind in (None, "real"):
             real(args.videos_only, Path(tmp))
+            if args.estimates:
+                estimates("real", Path(tmp))
         if args.kind in (None, "synthetic"):
             synthetic(args.videos_only, Path(tmp))
+            if args.estimates:
+                estimates("synthetic", Path(tmp))
 
 if __name__ == "__main__":
     main()

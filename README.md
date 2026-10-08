@@ -50,6 +50,11 @@ Can a coding agent watch a video of a physical event and write a program that re
 
 The benchmark has two main stages. **Inference** runs a coding agent on a reference video and saves its submission. **Scoring** evaluates that submission against the reference. The harness is the set of scripts that launches these stages, supplies their inputs, and collects their outputs. A separate viewer lets you inspect the reconstructions and scores.
 
+## News
+
+- **2026-10-08**: Released [Dataset-Model-Estimation](https://huggingface.co/datasets/4DCodeBench/Dataset-Model-Estimation), the precomputed reference estimates for scoring.
+- **2026-10-05**: Paper released on [arXiv](https://arxiv.org/abs/2610.03715).
+
 ## Setup
 
 ### Clone the repository
@@ -126,7 +131,7 @@ If you only want to run agents, the reference videos are enough:
 python scripts/download_data.py --videos-only
 ```
 
-The script downloads [Dataset-Real-World](https://huggingface.co/datasets/4DCodeBench/Dataset-Real-World) and [Dataset-Synthetic](https://huggingface.co/datasets/4DCodeBench/Dataset-Synthetic) into `cases/` and `data/`. Add `--kind real` or `--kind synthetic` to download only one dataset. Files already in place are skipped, so you can resume an interrupted download by running the command again.
+The script downloads [Dataset-Real-World](https://huggingface.co/datasets/4DCodeBench/Dataset-Real-World) and [Dataset-Synthetic](https://huggingface.co/datasets/4DCodeBench/Dataset-Synthetic) into `cases/` and `data/`. Add `--kind real` or `--kind synthetic` to download only one dataset, and `--estimates` to also download the precomputed reference estimates from [Dataset-Model-Estimation](https://huggingface.co/datasets/4DCodeBench/Dataset-Model-Estimation) (53 GB). Files already in place are skipped, so you can resume an interrupted download by running the command again.
 
 The download script requires `huggingface_hub`, `h5py`, `hdf5plugin`, `numpy`, `opencv-python`, and FFmpeg. The synthetic reference worlds occupy about 65 GB once unpacked.
 
@@ -215,7 +220,7 @@ python harness/runtime/score.py --jobs .local/jobs.toml --runtime .local/runtime
 
 The two stages do different work:
 
-1. **`prepare`** computes reference estimates from each case's input video: optical flow, tracks, depth, a point map, and DINOv3 / TIPS features. These give the scorer reference measurements to compare with the reconstruction. They are stored in `data/<kind>/<case>/estimates/` and reused when scoring later runs of the same case.
+1. **`prepare`** computes reference estimates from each case's input video: optical flow, tracks, depth, a point map, and DINOv3 / TIPS features. These give the scorer reference measurements to compare with the reconstruction. They are stored in `data/<kind>/<case>/estimates/` and reused when scoring later runs of the same case. With `download_data.py --estimates`, they come precomputed and `prepare` can be skipped.
 2. **`score`** evaluates each submitted reconstruction and writes `reward.json`, `reward.detail.json`, and the arrays used by the metrics to that run's `results/` directory.
 
 Once reference estimates exist, you can run scoring alone by omitting `--stage`; the default stage is `score`.
